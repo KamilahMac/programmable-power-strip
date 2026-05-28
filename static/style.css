@@ -78,20 +78,20 @@ h3 {
         }
         #ws-pill.connected { background: #4caf50; color: #fff; }
 
-        /* ADDED: present limit label */
+        /* present limit label */
         .present-limit-label {
             margin-top: 10px;
             font-weight: normal;
             font-size: 13px;
         }
 
-        /* ADDED: pending indicator on dropdown */
+        /* pending indicator on dropdown */
         select.pending {
             border: 2px solid #ff9800;
             background-color: #fff8e1;
         }
 
-        /* ADDED: Save Current Limit button */
+        /* Save Current Limit button */
         .btn-save-limit {
             background-color: #1976d2;
             color: #fff;

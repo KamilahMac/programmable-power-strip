@@ -9,9 +9,9 @@
         const MAX_POINTS  = 30;
  
         // ── State ─────────────────────────────────────────────────────────────
-        let outletStates  = [false, false, false];  // CHANGED: default disabled
+        let outletStates  = [false, false, false];  // default disabled
         let currentLimits = [7.5,  7.5,  7.5 ];
-        // ADDED: pending limit state
+        
         let pendingLimits = [7.5,  7.5,  7.5 ];
         let limitPending  = [false, false, false];
         let hourlyData    = [[], [], []];   // {x: hour 0-23, y: kWh} one point per hour
@@ -121,7 +121,7 @@
                 outletStates[index] ? 'ok' : 'err');
         }
 
-        // ADDED: render outlet button to match a given true/false state
+        // render outlet button to match a given true/false state
         function renderOutletButton(index, enabled) {
             const btn = document.getElementById(`btn-${index}`);
             if (enabled) {
@@ -135,13 +135,13 @@
             }
         }
 
-        // ADDED: update present limit label
+        // update present limit label
         function renderPresentLimit(index, value) {
             document.getElementById(`present-limit-${index}`).textContent =
                 parseFloat(value).toFixed(1) + ' A';
         }
 
-        // ADDED: dropdown changed — mark as pending, do NOT call sendSettings
+        //  dropdown changed — mark as pending, do NOT call sendSettings
         function onLimitChange(index, value) {
             pendingLimits[index] = parseFloat(value);
             limitPending[index]  = (pendingLimits[index] !== currentLimits[index]);
@@ -159,10 +159,10 @@
             }
         }
 
-        // ADDED: Save button pressed — commit pending limit and send
+        // Save button pressed — commit pending limit and send
         async function saveLimit(index) {
             currentLimits[index] = pendingLimits[index];
-            //limitSavedAt[index] = Date.now();
+            
             limitPending[index]  = false;
 
             renderPresentLimit(index, currentLimits[index]);
@@ -196,7 +196,7 @@
 
 
 
-        // ADDED: apply outlet on/off and limit state from server into UI
+        //  apply outlet on/off and limit state from server into UI
         function applyServerState(data) {
             if (Array.isArray(data.outlet_on_off)) {
                 for (let i = 0; i < NUM_OUTLETS; i++) {
@@ -210,8 +210,7 @@
             if (Array.isArray(data.outlet_current_limit)) {
                 for (let i = 0; i < NUM_OUTLETS; i++) {
                     const lim = parseFloat(data.outlet_current_limit[i]);
-                    if (!isNaN(lim)){//&& lim !== currentLimits[i]) {
-                        //if(Date.now() - limitSavedAt[i]<5000) continue
+                    if (!isNaN(lim)){
                         currentLimits[i] = lim;
                         renderPresentLimit(i, lim);
                         if (!limitPending[i]) {
@@ -324,7 +323,7 @@
         // ── Init ──────────────────────────────────────────────────────────────
         buildSelects();
         buildCharts();
-        // ADDED: render initial disabled state and present limits
+        // render initial disabled state and present limits
         for (let i = 0; i < NUM_OUTLETS; i++) {
             renderOutletButton(i, false);
             renderPresentLimit(i, currentLimits[i]);
