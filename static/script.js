@@ -1,6 +1,6 @@
       // ── Config ────────────────────────────────────────────────────────────
-        const SERVER_IP   = "10.22.188.67";
-        //const SERVER_IP   = "192.168.100.65";
+        //const SERVER_IP   = "10.22.188.67";
+        const SERVER_IP   = "192.168.100.65";
         
         const SERVER_PORT = "8000";
         const API_BASE    = `http://${SERVER_IP}:${SERVER_PORT}`;
