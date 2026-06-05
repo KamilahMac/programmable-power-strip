@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+   <link rel="stylesheet" href="/static/style.css">
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>  <!-- ← ADD THIS -->
+</head>
+
+<body>
+    <header>
+        <nav>
+            <ul>
+        
+                <img src="/static/power_strip_pic.png" alt="powerstrippic" width="200" height="200">
+
+            </ul>
+        </nav>
+        <hr>
+        <h1>Outlet Energy Usage</h1>
+    </header>
+ 
+    <!-- Status bar -->
+    <div id="status-bar">
+        <span>Last update: <strong id="last-update">—</strong></span>
+        <span id="ws-pill">● DISCONNECTED</span>
+        <span>Total power: <strong id="total-power">0.00 W</strong></span>
+    </div>
+ 
+    <ul>
+        <!-- Outlet 1 -->
+        <li>
+            <h2>Outlet 1</h2>
+            <div class="energy-label">Energy Used This Period: <span id="rt-0">0.000000</span> kWh</div>
+            <div class="energy-label">Daily Usage: <span id="daily-0">0.000000</span> kWh</div>
+            <br>
+            <!-- present current limit -->
+            <div class="present-limit-label">Present Current Limit: <span id="present-limit-0">7.5 A</span></div>
+            <div style="margin-top: 10px;">Set Current Limit</div>
+            <select id="limit-0" onchange="onLimitChange(0, this.value)"></select>
+            <!-- save button -->
+            <button class="btn-save-limit" id="save-btn-0" onclick="saveLimit(0)" disabled>Save Current Limit</button>
+            <br><br>
+            <div class="state-label">Present Outlet State:</div>
+            <button id="btn-0" onclick="toggleOutlet(0)">Outlet Disabled</button>
+            <br><br>
+            <div style="margin-top:10px; font-size:12px; font-weight:normal;">Daily Usage (hourly)</div>
+            <canvas id="chart-daily-0" width="260" height="160"></canvas>
+        </li>
+ 
+        <!-- Outlet 2 -->
+        <li>
+            <h2>Outlet 2</h2>
+            <div class="energy-label">Energy Used This Period: <span id="rt-1">0.000000</span> kWh</div>
+            <div class="energy-label">Daily Usage: <span id="daily-1">0.000000</span> kWh</div>
+            <br>
+            <!-- present current limit -->
+            <div class="present-limit-label">Present Current Limit: <span id="present-limit-1">7.5 A</span></div>
+            <div style="margin-top: 10px;">Set Current Limit</div>
+            <select id="limit-1" onchange="onLimitChange(1, this.value)"></select>
+            <!-- save button -->
+            <button class="btn-save-limit" id="save-btn-1" onclick="saveLimit(1)" disabled>Save Current Limit</button>
+            <br><br>
+            <div class="state-label">Present Outlet State:</div>
+            <button id="btn-1" onclick="toggleOutlet(1)">Outlet Disabled</button>
+            <br><br>
+            <div style="margin-top:10px; font-size:12px; font-weight:normal;">Daily Usage (hourly)</div>
+            <canvas id="chart-daily-1" width="260" height="160"></canvas>
+        </li>
+ 
+        <!-- Outlet 3 -->
+        <li>
+            <h2>Outlet 3</h2>
+            <div class="energy-label">Energy Used This Period: <span id="rt-2">0.000000</span> kWh</div>
+            <div class="energy-label">Daily Usage: <span id="daily-2">0.000000</span> kWh</div>
+            <br>
+            <!-- present current limit -->
+            <div class="present-limit-label">Present Current Limit: <span id="present-limit-2">7.5 A</span></div>
+            <div style="margin-top: 10px;">Set Current Limit</div>
+            <select id="limit-2" onchange="onLimitChange(2, this.value)"></select>
+            <!-- save button -->
+            <button class="btn-save-limit" id="save-btn-2" onclick="saveLimit(2)" disabled>Save Current Limit</button>
+            <br><br>
+            <div class="state-label">Present Outlet State:</div>
+            <button id="btn-2" onclick="toggleOutlet(2)">Outlet Disabled</button>
+            <br><br>
+            <div style="margin-top:10px; font-size:12px; font-weight:normal;">Daily Usage (hourly)</div>
+            <canvas id="chart-daily-2" width="260" height="160"></canvas>
+        </li>
+    </ul>
+ 
+    <!-- Log panel -->
+    <div id="log-panel">
+        <div id="log"></div>
+    </div>
+ <script src="/static/script.js"></script>
+</body>
+</html>
