@@ -1,0 +1,1324 @@
+#define F_CPU 8000000UL
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/sleep.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdbool.h>
+#include <util/delay.h>
+#include "uart.h"
+#include "eeprom.h"
+
+// Address map for EEPROM
+#define EEPROM_INIT_FLAG    0x00
+#define EEPROM_OUT1_LIMIT   0x01
+#define EEPROM_OUT2_LIMIT   0x05
+#define EEPROM_OUT3_LIMIT   0x09
+#define EEPROM_OUT1_ENABLE  0x0D
+#define EEPROM_OUT2_ENABLE  0x0E
+#define EEPROM_OUT3_ENABLE  0x0F
+
+#define OUTLET1_LED_PIN  PINB2
+#define OUTLET2_LED_PIN  PINB0
+#define OUTLET3_LED_PIN  PIND4
+
+#define BUZZER_PIN       PINB1
+
+// ---------------- Startup message delimiters ----------------
+#define STARTUP_OUT1_CL   "L"   // Startup OUT1
+#define STARTUP_OUT2_CL   "M"   // Startup OUT2
+#define STARTUP_OUT3_CL   "N"   // Startup OUT3
+#define STARTUP_OUT_CL_END   "|"    // End of a variable
+#define end_of_str "\n"
+#define STARTUP_EN_OUT1    "P"   // Enable OUT1
+#define STARTUP_EN_OUT2    "Q"   // Enable OUT2
+#define STARTUP_EN_OUT3    "R"   // Enable OUT3
+#define STARTUP_OUT_EN_END   "["    // End of a variable
+// ============================================================
+#define CURR1_ADDR      "@"
+#define CURR2_ADDR      "%"
+#define CURR3_ADDR      "&"
+#define CURR_ENDS       "+"
+#define ENGR1_ADDR      "#"
+#define ENGR2_ADDR      "$"
+#define ENGR3_ADDR      "?"
+#define ENGY_ENDS       "<"
+#define OUT1_RESET_ADDR "^"
+#define OUT2_RESET_ADDR "*"
+#define OUT3_RESET_ADDR "~"
+#define OUTRST_ENDS     "="
+#define end_of_str      "\n"
+// ============================================================
+#define OUT1_EN_START          'A'
+#define OUT1_DIS_START         'B'
+#define OUT2_EN_START          'C'
+#define OUT2_DIS_START         'D'
+#define OUT3_EN_START          'E'
+#define OUT3_DIS_START         'F'
+#define OUT1_CURR_LIMIT_START  '!'
+#define OUT2_CURR_LIMIT_START  'G'
+#define OUT3_CURR_LIMIT_START  'H'
+#define ENABLE_END      '}'
+#define DISABLE_END     ')'
+#define CURR_LIMIT_END  '<'
+// ============================================================
+#define SAMPLES          200
+#define VREF             5.232f
+#define ADC_MAX          1023.0f
+#define BURDEN_R         50.0f
+#define OP_AMP_GAIN      2.0f
+#define SAMPLE_DELAY_US  200
+#define AVG_READINGS     2
+#define CT_RATIO         1000.0f
+#define VOLT_SENSOR_GAIN 1.0f
+#define VOLT_SCALE       1.0f
+#define NOISE_FLOOR_A    0.100f
+#define VOLT_NOISE_FLOOR 0.5f
+#define CAL_FACTOR       1.0f
+#define CAL_FACTOR_V     1.0f
+// ============================================================
+#define OVERCURRENT_TIMEOUT_MS  60
+#define LOOP_DELAY_MS           1
+#define BLINK_HALF_PERIOD_MS    1
+
+// ============================================================
+char buffer[30];
+char str[30];
+char str1[30];
+char stmsg[40];
+volatile char data;
+
+uint16_t adcport_val[6];
+uint8_t  port_val = 0;
+uint16_t adc_val;
+
+uint8_t outlet1_enable = 0;
+uint8_t outlet2_enable = 0;
+uint8_t outlet3_enable = 0;
+float outlet1_set_current_limit = 7.5;
+float outlet2_set_current_limit = 7.5;
+float outlet3_set_current_limit = 7.5;
+static uint8_t eeprom_dirty = 0;
+
+// ============================================================
+// --- Outlet 1 ---
+float    out1_irms  = 0.0f, out1_vrms  = 0.0f, out1_vopamp  = 0.0f;
+volatile float out1_set_cur_limit = 7.5f;
+volatile uint8_t  out1_enabled_state        = 0;
+volatile uint8_t  out1_tripped              = 0;
+volatile uint8_t  out1_message_sent         = 0;
+volatile uint8_t  out1_overcurrent_detected = 0;
+volatile uint16_t out1_overcurrent_counter  = 0;
+volatile uint8_t  out1_current_limit_reset_flag = 0;
+float out1_realtime_power_watts      = 0.0f;
+static uint8_t  out1_blink_state   = 0;
+static uint16_t out1_blink_counter = 0;
+// Trip timing - Outlet 1
+uint8_t  out1_trip_count      = 0;
+uint16_t out1_trip_start_tick = 0;
+// ============================================================
+// --- Outlet 2 ---
+float    out2_irms  = 0.0f, out2_vrms  = 0.0f, out2_vopamp  = 0.0f;
+volatile float out2_set_cur_limit = 7.5f;
+volatile uint8_t  out2_enabled_state        = 0;
+volatile uint8_t  out2_tripped              = 0;
+volatile uint8_t  out2_message_sent         = 0;
+volatile uint8_t  out2_overcurrent_detected = 0;
+volatile uint16_t out2_overcurrent_counter  = 0;
+volatile uint8_t  out2_current_limit_reset_flag = 0;
+float out2_realtime_power_watts      = 0.0f;
+static uint8_t  out2_blink_state   = 0;
+static uint16_t out2_blink_counter = 0;
+// Trip timing - Outlet 2
+uint8_t  out2_trip_count      = 0;
+uint16_t out2_trip_start_tick = 0;
+// ============================================================
+// --- Outlet 3 ---
+float    out3_irms  = 0.0f, out3_vrms  = 0.0f, out3_vopamp  = 0.0f;
+volatile float out3_set_cur_limit = 7.5f;
+volatile uint8_t  out3_enabled_state        = 0;
+volatile uint8_t  out3_tripped              = 0;
+volatile uint8_t  out3_message_sent         = 0;
+volatile uint8_t  out3_overcurrent_detected = 0;
+volatile uint16_t out3_overcurrent_counter  = 0;
+volatile uint8_t  out3_current_limit_reset_flag = 0;
+float out3_realtime_power_watts      = 0.0f;
+static uint8_t  out3_blink_state   = 0;
+static uint16_t out3_blink_counter = 0;
+// Trip timing - Outlet 3
+uint8_t  out3_trip_count      = 0;
+uint16_t out3_trip_start_tick = 0;
+// ======================================================================
+char out1_irms_print[30], out1_vrms_print[30], out1_vopamp_print[20];
+char out2_irms_print[30], out2_vrms_print[30], out2_vopamp_print[20];
+char out3_irms_print[30], out3_vrms_print[30], out3_vopamp_print[20];
+char act_float_engr_sen_1_print[30];
+char act_float_engr_sen_2_print[30];
+char act_float_engr_sen_3_print[30];
+// ============================================================
+// UART receive buffers
+char char_out1_en_value[30];
+char char_out1_dis_value[30];
+char char_out2_en_value[30];
+char char_out2_dis_value[30];
+char char_out3_en_value[30];
+char char_out3_dis_value[30];
+char char_out1_curr_limit[30];
+char char_out2_curr_limit[30];
+char char_out3_curr_limit[30];
+// ============================================================
+// ISR receive state machine
+volatile uint8_t out1_en_active         = 0;
+volatile uint8_t out1_dis_active        = 0;
+volatile uint8_t out2_en_active         = 0;
+volatile uint8_t out2_dis_active        = 0;
+volatile uint8_t out3_en_active         = 0;
+volatile uint8_t out3_dis_active        = 0;
+volatile uint8_t out1_curr_limit_active = 0;
+volatile uint8_t out2_curr_limit_active = 0;
+volatile uint8_t out3_curr_limit_active = 0;
+
+uint8_t out1_en_index         = 0;
+uint8_t out1_dis_index        = 0;
+uint8_t out2_en_index         = 0;
+uint8_t out2_dis_index        = 0;
+uint8_t out3_en_index         = 0;
+uint8_t out3_dis_index        = 0;
+uint8_t out1_curr_limit_index = 0;
+uint8_t out2_curr_limit_index = 0;
+uint8_t out3_curr_limit_index = 0;
+// ============================================================
+// Flags set by ISR, consumed by main loop
+volatile uint8_t out1_en_flag         = 0;
+volatile uint8_t out1_dis_flag        = 0;
+volatile uint8_t out2_en_flag         = 0;
+volatile uint8_t out2_dis_flag        = 0;
+volatile uint8_t out3_en_flag         = 0;
+volatile uint8_t out3_dis_flag        = 0;
+volatile uint8_t out1_curr_limit_flag = 0;
+volatile uint8_t out2_curr_limit_flag = 0;
+volatile uint8_t out3_curr_limit_flag = 0;
+
+volatile char rx_data;
+// ============================================================
+// Command flags from ISR
+volatile uint8_t enable_out1_flag  = 0;
+volatile uint8_t disable_out1_flag = 0;
+volatile uint8_t enable_out2_flag  = 0;
+volatile uint8_t disable_out2_flag = 0;
+volatile uint8_t enable_out3_flag  = 0;
+volatile uint8_t disable_out3_flag = 0;
+
+volatile uint32_t millis_count = 0;   // incremented every 1 ms
+volatile uint8_t  energy_tick  = 0;   // set every 1 second by ISR
+
+// sec/min/hour counters for energy
+volatile uint32_t sec_count  = 0;
+volatile uint32_t min_count  = 0;
+volatile uint32_t hour_count = 0;
+
+volatile float out1_energy_wh = 0.0f;
+volatile float out2_energy_wh = 0.0f;
+volatile float out3_energy_wh = 0.0f;
+
+
+void save_settings_to_eeprom() {
+	EEPROM_write(EEPROM_INIT_FLAG, 0xAB);
+	EEPROM_write_float(EEPROM_OUT1_LIMIT, outlet1_set_current_limit);
+	EEPROM_write_float(EEPROM_OUT2_LIMIT, outlet2_set_current_limit);
+	EEPROM_write_float(EEPROM_OUT3_LIMIT, outlet3_set_current_limit);
+	EEPROM_write(EEPROM_OUT1_ENABLE, outlet1_enable);
+	EEPROM_write(EEPROM_OUT2_ENABLE, outlet2_enable);
+	EEPROM_write(EEPROM_OUT3_ENABLE, outlet3_enable);
+}
+
+void load_settings_from_eeprom() {
+	if (EEPROM_read(EEPROM_INIT_FLAG) != 0xAB) {
+		// EEPROM not initialized — write defaults
+		outlet1_set_current_limit = 7.5;
+		outlet2_set_current_limit = 7.5;
+		outlet3_set_current_limit = 7.5;
+		outlet1_enable = 0;
+		outlet2_enable = 0;
+		outlet3_enable = 0;
+
+		// Save defaults — this ensures EEPROM has valid floats
+		save_settings_to_eeprom();
+		} else {
+		// EEPROM already initialized — read floats safely
+		outlet1_set_current_limit = EEPROM_read_float(EEPROM_OUT1_LIMIT);
+		outlet2_set_current_limit = EEPROM_read_float(EEPROM_OUT2_LIMIT);
+		outlet3_set_current_limit = EEPROM_read_float(EEPROM_OUT3_LIMIT);
+		outlet1_enable = EEPROM_read(EEPROM_OUT1_ENABLE);
+		outlet2_enable = EEPROM_read(EEPROM_OUT2_ENABLE);
+		outlet3_enable = EEPROM_read(EEPROM_OUT3_ENABLE);
+	}
+}
+
+static inline void timer1_init(void)
+{
+	TCCR1A = 0;
+	TCCR1B = (1 << WGM12) | (1 << CS11) | (1 << CS10); // CTC, prescaler 64
+	OCR1A  = 124;   // (8,000,000 / 64 / 1000) - 1 = 124  -> 1 ms
+	TCNT1  = 0;
+	TIMSK1 |= (1 << OCIE1A);  // enable compare match A interrupt
+}
+
+
+ISR(TIMER1_COMPA_vect)
+{
+	millis_count++;   // 1 ms tick — used for overcurrent dt
+
+	static uint16_t ms_accum = 0;
+	if (++ms_accum >= 1000) {
+		ms_accum = 0;
+		energy_tick = 1;   // signal main loop: 1 second has elapsed
+
+		sec_count++;
+		if (sec_count == 60) { min_count++;  sec_count = 0; }
+		if (min_count == 60) { hour_count++; min_count = 0; }
+	}
+}
+
+
+// ============================================================
+// OUTLET TRIP BLINK FUNCTIONS
+// ============================================================
+
+void handle_out1_trip_blink(void)
+{
+	const uint16_t blink_passes = BLINK_HALF_PERIOD_MS / LOOP_DELAY_MS;
+
+	if (!out1_tripped) {
+		out1_blink_state   = 0;
+		out1_blink_counter = 0;
+		return;
+	}
+	if (++out1_blink_counter >= blink_passes) {
+		out1_blink_counter = 0;
+		out1_blink_state  ^= 1;
+		if (out1_blink_state) PORTB |=  (1 << OUTLET1_LED_PIN);
+		else                  PORTB &= ~(1 << OUTLET1_LED_PIN);
+	}
+}
+
+void handle_out2_trip_blink(void)
+{
+	const uint16_t blink_passes = BLINK_HALF_PERIOD_MS / LOOP_DELAY_MS;
+
+	if (!out2_tripped) {
+		out2_blink_state   = 0;
+		out2_blink_counter = 0;
+		return;
+	}
+	if (++out2_blink_counter >= blink_passes) {
+		out2_blink_counter = 0;
+		out2_blink_state  ^= 1;
+		if (out2_blink_state) PORTB |=  (1 << OUTLET2_LED_PIN);
+		else                  PORTB &= ~(1 << OUTLET2_LED_PIN);
+	}
+}
+
+void handle_out3_trip_blink(void)
+{
+	const uint16_t blink_passes = BLINK_HALF_PERIOD_MS / LOOP_DELAY_MS;
+
+	if (!out3_tripped) {
+		out3_blink_state   = 0;
+		out3_blink_counter = 0;
+		return;
+	}
+	if (++out3_blink_counter >= blink_passes) {
+		out3_blink_counter = 0;
+		out3_blink_state  ^= 1;
+		if (out3_blink_state) PORTD |=  (1 << OUTLET3_LED_PIN);
+		else                  PORTD &= ~(1 << OUTLET3_LED_PIN);
+	}
+}
+
+void handle_buzzer(void)
+{
+	if ((out1_tripped && out1_blink_state) ||
+	(out2_tripped && out2_blink_state) ||
+	(out3_tripped && out3_blink_state))
+	{
+		PORTB |= (1 << BUZZER_PIN);
+	}
+	else
+	{
+		PORTB &= ~(1 << BUZZER_PIN);
+	}
+}
+
+
+// ============================================================
+// UART RX ISR
+// ============================================================
+
+ISR(USART_RX_vect)
+{
+	rx_data = UDR0;
+
+	if (rx_data == OUT1_EN_START) {
+		out1_en_active = 1;
+		out1_dis_active = out2_en_active = out2_dis_active = out3_en_active = out3_dis_active = 0;
+		out1_curr_limit_active = out2_curr_limit_active = out3_curr_limit_active = 0;
+		out1_en_index = 0; return;
+	}
+	if (rx_data == OUT1_DIS_START) {
+		out1_dis_active = 1;
+		out1_en_active = out2_en_active = out2_dis_active = out3_en_active = out3_dis_active = 0;
+		out1_curr_limit_active = out2_curr_limit_active = out3_curr_limit_active = 0;
+		out1_dis_index = 0; return;
+	}
+	if (rx_data == OUT2_EN_START) {
+		out2_en_active = 1;
+		out1_en_active = out1_dis_active = out2_dis_active = out3_en_active = out3_dis_active = 0;
+		out1_curr_limit_active = out2_curr_limit_active = out3_curr_limit_active = 0;
+		out2_en_index = 0; return;
+	}
+	if (rx_data == OUT2_DIS_START) {
+		out2_dis_active = 1;
+		out1_en_active = out1_dis_active = out2_en_active = out3_en_active = out3_dis_active = 0;
+		out1_curr_limit_active = out2_curr_limit_active = out3_curr_limit_active = 0;
+		out2_dis_index = 0; return;
+	}
+	if (rx_data == OUT3_EN_START) {
+		out3_en_active = 1;
+		out1_en_active = out1_dis_active = out2_en_active = out2_dis_active = out3_dis_active = 0;
+		out1_curr_limit_active = out2_curr_limit_active = out3_curr_limit_active = 0;
+		out3_en_index = 0; return;
+	}
+	if (rx_data == OUT3_DIS_START) {
+		out3_dis_active = 1;
+		out1_en_active = out1_dis_active = out2_en_active = out2_dis_active = out3_en_active = 0;
+		out1_curr_limit_active = out2_curr_limit_active = out3_curr_limit_active = 0;
+		out3_dis_index = 0; return;
+	}
+	if (rx_data == OUT1_CURR_LIMIT_START) {
+		out1_curr_limit_active = 1;
+		out1_en_active = out1_dis_active = out2_en_active = out2_dis_active = out3_en_active = out3_dis_active = 0;
+		out2_curr_limit_active = out3_curr_limit_active = 0;
+		out1_curr_limit_index = 0; return;
+	}
+	if (rx_data == OUT2_CURR_LIMIT_START) {
+		out2_curr_limit_active = 1;
+		out1_en_active = out1_dis_active = out2_en_active = out2_dis_active = out3_en_active = out3_dis_active = 0;
+		out1_curr_limit_active = out3_curr_limit_active = 0;
+		out2_curr_limit_index = 0; return;
+	}
+	if (rx_data == OUT3_CURR_LIMIT_START) {
+		out3_curr_limit_active = 1;
+		out1_en_active = out1_dis_active = out2_en_active = out2_dis_active = out3_en_active = out3_dis_active = 0;
+		out1_curr_limit_active = out2_curr_limit_active = 0;
+		out3_curr_limit_index = 0; return;
+	}
+
+	if (out1_en_active) {
+		if (rx_data == ENABLE_END) {
+			out1_en_active = 0;
+			char_out1_en_value[out1_en_index] = '\0';
+			out1_en_index = 0;
+			if (strcmp(char_out1_en_value, "out1_en") == 0) {
+				enable_out1_flag  = 1;
+				disable_out1_flag = 0;
+				out1_en_flag      = 1;
+			}
+			} else { if (out1_en_index < 29) char_out1_en_value[out1_en_index++] = rx_data; }
+			return;
+		}
+		if (out1_dis_active) {
+			if (rx_data == DISABLE_END) {
+				out1_dis_active = 0;
+				char_out1_dis_value[out1_dis_index] = '\0';
+				out1_dis_index = 0;
+				if (strcmp(char_out1_dis_value, "out1_dis") == 0) {
+					disable_out1_flag = 1;
+					enable_out1_flag  = 0;
+					out1_dis_flag     = 1;
+				}
+				} else { if (out1_dis_index < 29) char_out1_dis_value[out1_dis_index++] = rx_data; }
+				return;
+			}
+			if (out2_en_active) {
+				if (rx_data == ENABLE_END) {
+					out2_en_active = 0;
+					char_out2_en_value[out2_en_index] = '\0';
+					out2_en_index = 0;
+					if (strcmp(char_out2_en_value, "out2_en") == 0) {
+						enable_out2_flag  = 1;
+						disable_out2_flag = 0;
+						out2_en_flag      = 1;
+					}
+					} else { if (out2_en_index < 29) char_out2_en_value[out2_en_index++] = rx_data; }
+					return;
+				}
+				if (out2_dis_active) {
+					if (rx_data == DISABLE_END) {
+						out2_dis_active = 0;
+						char_out2_dis_value[out2_dis_index] = '\0';
+						out2_dis_index = 0;
+						if (strcmp(char_out2_dis_value, "out2_dis") == 0) {
+							disable_out2_flag = 1;
+							enable_out2_flag  = 0;
+							out2_dis_flag     = 1;
+						}
+						} else { if (out2_dis_index < 29) char_out2_dis_value[out2_dis_index++] = rx_data; }
+						return;
+					}
+					if (out3_en_active) {
+						if (rx_data == ENABLE_END) {
+							out3_en_active = 0;
+							char_out3_en_value[out3_en_index] = '\0';
+							out3_en_index = 0;
+							if (strcmp(char_out3_en_value, "out3_en") == 0) {
+								enable_out3_flag  = 1;
+								disable_out3_flag = 0;
+								out3_en_flag      = 1;
+							}
+							} else { if (out3_en_index < 29) char_out3_en_value[out3_en_index++] = rx_data; }
+							return;
+						}
+						if (out3_dis_active) {
+							if (rx_data == DISABLE_END) {
+								out3_dis_active = 0;
+								char_out3_dis_value[out3_dis_index] = '\0';
+								out3_dis_index = 0;
+								if (strcmp(char_out3_dis_value, "out3_dis") == 0) {
+									disable_out3_flag = 1;
+									enable_out3_flag  = 0;
+									out3_dis_flag     = 1;
+								}
+								} else { if (out3_dis_index < 29) char_out3_dis_value[out3_dis_index++] = rx_data; }
+								return;
+							}
+							if (out1_curr_limit_active) {
+								if (rx_data == CURR_LIMIT_END) {
+									out1_curr_limit_active = 0;
+									out1_curr_limit_flag   = 1;
+									char_out1_curr_limit[out1_curr_limit_index] = '\0';
+									out1_curr_limit_index  = 0;
+									out1_current_limit_reset_flag = 1;
+									} else { if (out1_curr_limit_index < 29) char_out1_curr_limit[out1_curr_limit_index++] = rx_data; }
+									return;
+								}
+								if (out2_curr_limit_active) {
+									if (rx_data == CURR_LIMIT_END) {
+										out2_curr_limit_active = 0;
+										out2_curr_limit_flag   = 1;
+										char_out2_curr_limit[out2_curr_limit_index] = '\0';
+										out2_curr_limit_index  = 0;
+										out2_current_limit_reset_flag = 1;
+										} else { if (out2_curr_limit_index < 29) char_out2_curr_limit[out2_curr_limit_index++] = rx_data; }
+										return;
+									}
+									if (out3_curr_limit_active) {
+										if (rx_data == CURR_LIMIT_END) {
+											out3_curr_limit_active = 0;
+											out3_curr_limit_flag   = 1;
+											char_out3_curr_limit[out3_curr_limit_index] = '\0';
+											out3_curr_limit_index  = 0;
+											out3_current_limit_reset_flag = 1;
+											} else { if (out3_curr_limit_index < 29) char_out3_curr_limit[out3_curr_limit_index++] = rx_data; }
+											return;
+										}
+									}
+
+									// ============================================================
+									// ADC BACKGROUND ISR
+									// ============================================================
+									ISR(ADC_vect)
+									{
+										uint8_t adcl = ADCL;
+										uint8_t adch = ADCH;
+										adc_val = (adch << 8) | adcl;
+										adcport_val[port_val] = adc_val;
+										port_val = (port_val + 1) % 6;
+										ADMUX  = (ADMUX & 0b11110000) | port_val;
+										ADCSRA |= (1 << ADSC);
+									}
+
+									// ============================================================
+									// RMS CURRENT
+									// ============================================================
+									float calculate_rms_current(uint8_t adc_channel, float *p_vopamp)
+									{
+										uint16_t adc_samples[SAMPLES];
+										float    sum_squares = 0.0f;
+										int32_t  sum = 0;
+										int j;
+
+										ADCSRA &= ~(1 << ADIE);
+										ADMUX   = (ADMUX & 0xF0) | (adc_channel & 0x0F);
+										_delay_us(20);
+
+										for (j = 0; j < SAMPLES; j++) {
+											ADCSRA |= (1 << ADSC);
+											while (ADCSRA & (1 << ADSC));
+											uint8_t adcl = ADCL;
+											uint8_t adch = ADCH;
+											adc_samples[j] = (adch << 8) | adcl;
+											sum += adc_samples[j];
+											_delay_us(SAMPLE_DELAY_US);
+										}
+
+										ADCSRA |= (1 << ADIE);
+
+										float dc_offset = (float)sum / SAMPLES;
+										for (j = 0; j < SAMPLES; j++) {
+											float dev = (float)adc_samples[j] - dc_offset;
+											sum_squares += dev * dev;
+										}
+
+										float rms_adc     = sqrtf(sum_squares / SAMPLES);
+										float v_adc_rms   = (rms_adc * VREF) / ADC_MAX;
+										float v_opamp_in  = v_adc_rms / OP_AMP_GAIN;
+										float i_secondary = (v_opamp_in / BURDEN_R) * CAL_FACTOR;
+
+										if (p_vopamp) *p_vopamp = v_opamp_in;
+										return i_secondary;
+									}
+
+									// ============================================================
+									// RMS VOLTAGE
+									// ============================================================
+									float calculate_rms_voltage(uint8_t adc_channel)
+									{
+										uint16_t adc_samples[SAMPLES];
+										float    sum_squares = 0.0f;
+										int32_t  sum = 0;
+										int j;
+
+										ADCSRA &= ~(1 << ADIE);
+										ADMUX   = (ADMUX & 0xF0) | (adc_channel & 0x0F);
+										_delay_us(20);
+
+										for (j = 0; j < SAMPLES; j++) {
+											ADCSRA |= (1 << ADSC);
+											while (ADCSRA & (1 << ADSC));
+											uint8_t adcl = ADCL;
+											uint8_t adch = ADCH;
+											adc_samples[j] = (adch << 8) | adcl;
+											sum += adc_samples[j];
+											_delay_us(SAMPLE_DELAY_US);
+										}
+
+										ADCSRA |= (1 << ADIE);
+
+										float dc_offset = (float)sum / SAMPLES;
+										for (j = 0; j < SAMPLES; j++) {
+											float dev = (float)adc_samples[j] - dc_offset;
+											sum_squares += dev * dev;
+										}
+
+										float rms_adc     = sqrtf(sum_squares / SAMPLES);
+										float v_adc_rms   = (rms_adc * VREF) / ADC_MAX;
+										float v_sensor_in = v_adc_rms / VOLT_SENSOR_GAIN;
+										return v_sensor_in;
+									}
+
+									// ============================================================
+									// OUTLET RELAY + LED CONTROL FUNCTIONS
+									// ============================================================
+									// OUTLET 1
+
+									void control_outlet1_pin(void)
+									{
+										if (out1_tripped) {
+											PORTD &= ~(1 << PIND5);
+											out1_enabled_state = 0;
+
+
+											if (enable_out1_flag && disable_out1_flag) {
+												enable_out1_flag = disable_out1_flag = 0;
+												return;
+											}
+											if (disable_out1_flag) { disable_out1_flag = 0; return; }
+											if (enable_out1_flag) {
+
+												out1_tripped                  = 0;
+												out1_message_sent             = 0;
+												out1_current_limit_reset_flag = 0;
+												enable_out1_flag              = 0;
+												out1_blink_state              = 0;
+												out1_blink_counter            = 0;
+												PORTB &= ~(1 << OUTLET1_LED_PIN);
+												PORTD |=  (1 << PIND5);
+												PORTB |=  (1 << OUTLET1_LED_PIN);
+												out1_enabled_state = 1;
+												outlet1_enable = out1_enabled_state;
+												eeprom_dirty = 1;
+											}
+											return;
+										}
+
+										if (enable_out1_flag && disable_out1_flag) { enable_out1_flag = disable_out1_flag = 0; return; }
+										if (enable_out1_flag) {
+											PORTD |=  (1 << PIND5);
+											PORTB |=  (1 << OUTLET1_LED_PIN);
+											enable_out1_flag   = 0;
+											out1_enabled_state = 1;
+											outlet1_enable = out1_enabled_state;
+											eeprom_dirty = 1;
+											return;
+										}
+										if (disable_out1_flag) {
+											PORTD &= ~(1 << PIND5);
+											PORTB &= ~(1 << OUTLET1_LED_PIN);
+											disable_out1_flag  = 0;
+											out1_enabled_state = 0;
+											outlet1_enable = out1_enabled_state;
+											eeprom_dirty = 1;
+											return;
+										}
+									}
+
+									// ============================================================
+									// OUTLET 2
+
+									void control_outlet2_pin(void)
+									{
+										if (out2_tripped) {
+											PORTD &= ~(1 << PIND6);
+											out2_enabled_state = 0;
+
+
+											if (enable_out2_flag && disable_out2_flag) {
+												enable_out2_flag = disable_out2_flag = 0;
+												return;
+											}
+											if (disable_out2_flag) { disable_out2_flag = 0; return; }
+											if (enable_out2_flag) {
+
+												out2_tripped                  = 0;
+												out2_message_sent             = 0;
+												out2_current_limit_reset_flag = 0;
+												enable_out2_flag              = 0;
+												out2_blink_state              = 0;
+												out2_blink_counter            = 0;
+												PORTB &= ~(1 << OUTLET2_LED_PIN);
+												PORTD |=  (1 << PIND6);
+												PORTB |=  (1 << OUTLET2_LED_PIN);
+												out2_enabled_state = 1;
+												outlet2_enable = out2_enabled_state;
+												eeprom_dirty = 1;
+											}
+											return;
+										}
+
+										if (enable_out2_flag && disable_out2_flag) { enable_out2_flag = disable_out2_flag = 0; return; }
+										if (enable_out2_flag) {
+											PORTD |=  (1 << PIND6);
+											PORTB |=  (1 << OUTLET2_LED_PIN);
+											enable_out2_flag   = 0;
+											out2_enabled_state = 1;
+											outlet2_enable = out2_enabled_state;
+											eeprom_dirty = 1;
+											return;
+										}
+										if (disable_out2_flag) {
+											PORTD &= ~(1 << PIND6);
+											PORTB &= ~(1 << OUTLET2_LED_PIN);
+											disable_out2_flag  = 0;
+											out2_enabled_state = 0;
+											outlet2_enable = out2_enabled_state;
+											eeprom_dirty = 1;
+											return;
+										}
+									}
+
+									// ============================================================
+									// OUTLET 3
+
+									void control_outlet3_pin(void)
+									{
+										if (out3_tripped) {
+											PORTD &= ~(1 << PIND7);
+											out3_enabled_state = 0;
+
+
+											if (enable_out3_flag && disable_out3_flag) {
+												enable_out3_flag = disable_out3_flag = 0;
+												return;
+											}
+											if (disable_out3_flag) { disable_out3_flag = 0; return; }
+											if (enable_out3_flag) {
+
+												out3_tripped                  = 0;
+												out3_message_sent             = 0;
+												out3_current_limit_reset_flag = 0;
+												enable_out3_flag              = 0;
+												out3_blink_state              = 0;
+												out3_blink_counter            = 0;
+												PORTD &= ~(1 << OUTLET3_LED_PIN);
+												PORTD |=  (1 << PIND7);
+												PORTD |=  (1 << OUTLET3_LED_PIN);
+												out3_enabled_state = 1;
+												outlet3_enable = out3_enabled_state;
+												eeprom_dirty = 1;
+											}
+											return;
+										}
+
+										if (enable_out3_flag && disable_out3_flag) { enable_out3_flag = disable_out3_flag = 0; return; }
+										if (enable_out3_flag) {
+											PORTD |=  (1 << PIND7);
+											PORTD |=  (1 << OUTLET3_LED_PIN);
+											enable_out3_flag   = 0;
+											out3_enabled_state = 1;
+											outlet3_enable = out3_enabled_state;
+											eeprom_dirty = 1;
+											return;
+										}
+										if (disable_out3_flag) {
+											PORTD &= ~(1 << PIND7);
+											PORTD &= ~(1 << OUTLET3_LED_PIN);
+											disable_out3_flag  = 0;
+											out3_enabled_state = 0;
+											outlet3_enable = out3_enabled_state;
+											eeprom_dirty = 1;
+											return;
+										}
+									}
+
+									// ============================================================
+									// OVERCURRENT PROTECTION // dt_ms  = real elapsed milliseconds since last call (from Timer1)
+									// ============================================================
+									// OUTLET 1
+
+									void check_overcurrent_out1(float current_mA, uint16_t dt_ms)
+									{
+										if (out1_enabled_state != 1) {
+											out1_overcurrent_detected = 0;
+											out1_overcurrent_counter  = 0;
+											return;
+										}
+
+										if (current_mA > out1_set_cur_limit) {
+											if (!out1_overcurrent_detected) {
+												out1_overcurrent_detected = 1;
+												out1_overcurrent_counter = 0;
+												out1_trip_start_tick = TCNT1;
+
+												char debug[50];
+												sprintf(debug, "OC DETECTED! Start tick=%u dt_ms=%u\n", out1_trip_start_tick, dt_ms);
+												send_string(debug);
+											}
+
+											out1_overcurrent_counter += dt_ms;
+
+											if (out1_overcurrent_counter >= OVERCURRENT_TIMEOUT_MS && !out1_tripped && !out1_message_sent) {
+												/*
+												uint16_t now = TCNT1;
+												uint16_t start = out1_trip_start_tick;
+												uint16_t ticks;
+
+												if (now >= start) {
+												ticks = now - start;
+												} else {
+												ticks = (65535 - start) + now;
+												}
+
+												float trip_ms = (float)ticks / (float)TIMER1_TICKS_PER_MS;
+												*/
+												// Trip the outlet
+												out1_tripped = 1;
+												out1_message_sent = 1;
+												out1_enabled_state = 0;
+												out1_blink_state = 0;
+												out1_blink_counter = 0;
+												PORTD &= ~(1 << PIND5);
+												PORTB &= ~(1 << OUTLET1_LED_PIN);
+
+												char tmsg[30];
+												dtostrf(outlet1_set_current_limit, 4, 2, tmsg);
+
+												char msg[40];
+												strcpy(msg, OUT1_RESET_ADDR);
+												strcat(msg, tmsg);
+												strcat(msg, OUTRST_ENDS);
+												strcat(msg, end_of_str);
+												send_string(msg);
+												send_string("out1 tripped ");
+												send_cr_lf();
+											}
+											} else {
+											if (out1_overcurrent_detected) {
+
+											}
+											out1_overcurrent_detected = 0;
+											out1_overcurrent_counter = 0;
+										}
+									}
+									// ============================================================
+									// OUTLET 2
+									void check_overcurrent_out2(float current_mA, uint16_t dt_ms)
+									{
+										if (out2_enabled_state != 1) {
+											out2_overcurrent_detected = 0;
+											out2_overcurrent_counter  = 0;
+											return;
+										}
+
+										if (current_mA > out2_set_cur_limit) {
+											if (!out2_overcurrent_detected) {
+												out2_overcurrent_detected = 1;
+												out2_overcurrent_counter = 0;
+												out2_trip_start_tick = TCNT1;
+
+												char debug[50];
+												sprintf(debug, "OC DETECTED! Start tick=%u dt_ms=%u\n", out2_trip_start_tick, dt_ms);
+												send_string(debug);
+											}
+
+											out2_overcurrent_counter += dt_ms;
+
+											if (out2_overcurrent_counter >= OVERCURRENT_TIMEOUT_MS && !out2_tripped && !out2_message_sent) {
+												/*
+												uint16_t now = TCNT1;
+												uint16_t start = out2_trip_start_tick;
+												uint16_t ticks;
+
+												if (now >= start) {
+												ticks = now - start;
+												} else {
+												ticks = (65535 - start) + now;
+												}
+
+												float trip_ms = (float)ticks / (float)TIMER1_TICKS_PER_MS;
+												*/
+												// Trip the outlet
+												out2_tripped = 1;
+												out2_message_sent = 1;
+												out2_enabled_state = 0;
+												out2_blink_state = 0;
+												out2_blink_counter = 0;
+												PORTD &= ~(1 << PIND6);
+												PORTB &= ~(1 << OUTLET2_LED_PIN);
+
+												char tmsg[30];
+												dtostrf(outlet2_set_current_limit, 4, 2, tmsg);
+
+												char msg[40];
+												strcpy(msg, OUT2_RESET_ADDR);    // "*"
+												strcat(msg, tmsg);               // "67.58"
+												strcat(msg, OUTRST_ENDS);        // "="
+												strcat(msg, end_of_str);         // "\n"
+												send_string(msg);
+											}
+											} else {
+											out2_overcurrent_detected = 0;
+											out2_overcurrent_counter = 0;
+										}
+									}
+									// ============================================================
+									// OUTLET 3
+
+									void check_overcurrent_out3(float current_mA, uint16_t dt_ms)
+									{
+										if (out3_enabled_state != 1) {
+											out3_overcurrent_detected = 0;
+											out3_overcurrent_counter  = 0;
+											return;
+										}
+
+										if (current_mA > out3_set_cur_limit) {
+											if (!out3_overcurrent_detected) {
+												out3_overcurrent_detected = 1;
+												out3_overcurrent_counter = 0;
+												out3_trip_start_tick = TCNT1;
+
+												char debug[50];
+												sprintf(debug, "OC DETECTED! Start tick=%u dt_ms=%u\n", out3_trip_start_tick, dt_ms);
+												send_string(debug);
+											}
+
+											out3_overcurrent_counter += dt_ms;
+
+											if (out3_overcurrent_counter >= OVERCURRENT_TIMEOUT_MS && !out3_tripped && !out3_message_sent) {
+
+												/*
+												uint16_t now = TCNT1;
+												uint16_t start = out3_trip_start_tick;
+												uint16_t ticks;
+
+												if (now >= start) {
+												ticks = now - start;
+												} else {
+												ticks = (65535 - start) + now;
+												}
+
+												float trip_ms = (float)ticks / (float)TIMER1_TICKS_PER_MS;
+
+												*/
+												// Trip the outlet
+												out3_tripped = 1;
+												out3_message_sent = 1;
+												out3_enabled_state = 0;
+												out3_blink_state = 0;
+												out3_blink_counter = 0;
+												PORTD &= ~(1 << PIND7);
+												PORTD &= ~(1 << OUTLET3_LED_PIN);
+
+												char tmsg[30];
+												dtostrf(outlet3_set_current_limit, 4, 2, tmsg);
+
+												char msg[40];
+												strcpy(msg, OUT3_RESET_ADDR);    // "~"
+												strcat(msg, tmsg);               // "67.58"
+												strcat(msg, OUTRST_ENDS);        // "="
+												strcat(msg, end_of_str);         // "\n"
+												send_string(msg);
+											}
+											} else {
+											out3_overcurrent_detected = 0;
+											out3_overcurrent_counter = 0;
+										}
+									}
+									// ============================================================
+									// MAIN
+									// ============================================================
+
+									int main(void)
+									{
+										usart_init(51);
+										_delay_ms(100);
+
+										DDRD |=  (1 << PIND1);
+										DDRD &= ~((1 << PIND2) | (1 << PIND3));
+										DDRD |=  (1 << PIND4) | (1 << PIND5) | (1 << PIND6) | (1 << PIND7);
+										PORTD |= (1 << PIND2) | (1 << PIND3);
+										PORTD &= ~((1 << PIND5) | (1 << PIND6) | (1 << PIND7));
+
+										DDRB  |=  (1 << OUTLET1_LED_PIN); PORTB &= ~(1 << OUTLET1_LED_PIN);
+										DDRB  |=  (1 << OUTLET2_LED_PIN); PORTB &= ~(1 << OUTLET2_LED_PIN);
+										DDRD  |=  (1 << OUTLET3_LED_PIN); PORTD &= ~(1 << OUTLET3_LED_PIN);
+
+										EICRA |= (1 << ISC11) | (1 << ISC01);
+										EIMSK |= (1 << INT0)  | (1 << INT1);
+
+										DDRC &= ~((1 << PINC0) | (1 << PINC1) | (1 << PINC2)
+										| (1 << PINC3) | (1 << PINC4) | (1 << PINC5));
+										ADMUX  |= (1 << REFS0);
+										ADCSRA |= (1 << ADEN) | (1 << ADIE) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+										ADCSRA |= (1 << ADSC);
+										while (ADCSRA & (1 << ADSC));
+										ADCSRA |= (1 << ADSC);
+
+										UCSR0B |= (1 << RXCIE0);
+
+										/*
+										enable_out1_flag = 1; disable_out1_flag = 0; out1_enabled_state = 0;
+										enable_out2_flag = 1; disable_out2_flag = 0; out2_enabled_state = 0;
+										enable_out3_flag = 1; disable_out3_flag = 0; out3_enabled_state = 0;
+										*/
+
+										enable_out1_flag = 0; disable_out1_flag = 0; out1_enabled_state = 0;
+										enable_out2_flag = 0; disable_out2_flag = 0; out2_enabled_state = 0;
+										enable_out3_flag = 0; disable_out3_flag = 0; out3_enabled_state = 0;
+
+										DDRB |= (1 << BUZZER_PIN);
+										PORTB &= ~(1 << BUZZER_PIN);   // buzzer OFF
+
+										timer1_init();
+										uint32_t last_ms = millis_count;
+
+										//==================EEPROM START UP PRINT STATEMNET FOR ESP 32
+										load_settings_from_eeprom();
+
+										//==================EEPROM START UP PRINT STATEMENT FOR ESP32
+
+
+										// Prepare the startup strings (but don't send yet)
+										dtostrf(outlet1_set_current_limit, 5, 2, char_out1_curr_limit);
+										dtostrf(outlet2_set_current_limit, 5, 2, char_out2_curr_limit);
+										dtostrf(outlet3_set_current_limit, 5, 2, char_out3_curr_limit);
+
+										itoa(outlet1_enable, char_out1_en_value, 10);
+										itoa(outlet2_enable, char_out2_en_value, 10);
+										itoa(outlet3_enable, char_out3_en_value, 10);
+
+										// ?? Wait for ESP32 to signal it is ready ?????????????????????????
+										{
+											char ready_buf[16];
+											uint8_t ready_idx = 0;
+											uint8_t esp_ready = 0;
+
+											// Wait up to ~30 seconds for "ESP_READY\n"
+											// Each iteration: poll UART, then delay 1 ms ? ~30000 iterations max
+											for (uint32_t wait = 0; wait < 30000UL && !esp_ready; wait++) {
+												if (UCSR0A & (1 << RXC0)) {           // byte waiting in hardware
+													char c = UDR0;
+													if (c == '\n' || c == '\r') {
+														ready_buf[ready_idx] = '\0';
+														if (strncmp(ready_buf, "ESP_READY", 9) == 0) {
+															esp_ready = 1;
+														}
+														ready_idx = 0;                // reset for next line
+														} else {
+														if (ready_idx < 15) ready_buf[ready_idx++] = c;
+													}
+												}
+												_delay_ms(1);
+											}
+											// If timeout reached (no ESP connected), send anyway so standalone still works
+										}
+
+										// Now send the startup state
+										strcpy(stmsg, STARTUP_OUT1_CL);
+										strcat(stmsg, char_out1_curr_limit);
+										strcat(stmsg, STARTUP_OUT_CL_END);
+										strcat(stmsg, end_of_str);
+										send_string(stmsg);
+
+										strcpy(stmsg, STARTUP_OUT2_CL);
+										strcat(stmsg, char_out2_curr_limit);
+										strcat(stmsg, STARTUP_OUT_CL_END);
+										strcat(stmsg, end_of_str);
+										send_string(stmsg);
+
+										strcpy(stmsg, STARTUP_OUT3_CL);
+										strcat(stmsg, char_out3_curr_limit);
+										strcat(stmsg, STARTUP_OUT_CL_END);
+										strcat(stmsg, end_of_str);
+										send_string(stmsg);
+
+										strcpy(stmsg, STARTUP_EN_OUT1);
+										strcat(stmsg, char_out1_en_value);
+										strcat(stmsg, STARTUP_OUT_EN_END);
+										strcat(stmsg, end_of_str);
+										send_string(stmsg);
+
+										strcpy(stmsg, STARTUP_EN_OUT2);
+										strcat(stmsg, char_out2_en_value);
+										strcat(stmsg, STARTUP_OUT_EN_END);
+										strcat(stmsg, end_of_str);
+										send_string(stmsg);
+
+										strcpy(stmsg, STARTUP_EN_OUT3);
+										strcat(stmsg, char_out3_en_value);
+										strcat(stmsg, STARTUP_OUT_EN_END);
+										strcat(stmsg, end_of_str);
+										send_string(stmsg);
+
+										//=============================================================================================
+										//=============================================================================================
+										sei();
+										last_ms = millis_count;  
+
+										while (1) {
+
+											// measure real elapsed time since last loop iteration
+										// Snapshot atomically (millis_count is 32-bit, updated in ISR)
+										uint32_t now_ms;
+										cli();
+										now_ms = millis_count;
+										sei();
+
+										uint16_t dt_ms = (uint16_t)(now_ms - last_ms);
+										last_ms = now_ms;
+										
+											// ============================================================
+											// Current limit flags
+											if (out1_curr_limit_flag) {
+												out1_curr_limit_flag  = 0;
+												float new1_limit    = (float)atof(char_out1_curr_limit);
+												out1_set_cur_limit = new1_limit;          // update the protection variable too
+												if(new1_limit != outlet1_set_current_limit){
+													outlet1_set_current_limit = new1_limit;
+													eeprom_dirty = 1;
+												}
+												char temp[30]; dtostrf(out1_set_cur_limit, 5, 2, temp);
+												send_string("out1_curr_limit = "); send_string(temp); send_cr_lf();
+											}
+											if (out2_curr_limit_flag) {
+												out2_curr_limit_flag  = 0;
+												float new2_limit    = (float)atof(char_out2_curr_limit);
+												out2_set_cur_limit = new2_limit;
+												if(new2_limit != outlet2_set_current_limit){
+													outlet2_set_current_limit = new2_limit;
+													eeprom_dirty = 1;
+												}
+												char temp[30]; dtostrf(out2_set_cur_limit, 5, 2, temp);
+												send_string("out2_curr_limit = "); send_string(temp); send_cr_lf();
+											}
+											if (out3_curr_limit_flag) {
+												out3_curr_limit_flag  = 0;
+												float new3_limit    = (float)atof(char_out3_curr_limit);
+												out3_set_cur_limit = new3_limit;
+												if(new3_limit != outlet3_set_current_limit){
+													outlet3_set_current_limit = new3_limit;
+													eeprom_dirty = 1;
+												}
+												char temp[30]; dtostrf(out3_set_cur_limit, 5, 2, temp);
+												send_string("out3_curr_limit = "); send_string(temp); send_cr_lf();
+											}
+
+											out1_set_cur_limit = outlet1_set_current_limit;
+											out2_set_cur_limit = outlet2_set_current_limit;
+											out3_set_cur_limit = outlet3_set_current_limit;
+
+											// ============================================================
+											// Blink handlers
+											handle_out1_trip_blink();
+											handle_out2_trip_blink();
+											handle_out3_trip_blink();
+
+											handle_buzzer();
+
+											// ============================================================
+											// ADC sampling
+											float acc_i1 = 0.0f, acc_v1 = 0.0f, acc_vop1 = 0.0f;
+											float acc_i2 = 0.0f, acc_v2 = 0.0f, acc_vop2 = 0.0f;
+											float acc_i3 = 0.0f, acc_v3 = 0.0f, acc_vop3 = 0.0f;
+											float tmp_vop;
+											int k;
+
+											for (k = 0; k < AVG_READINGS; k++) {
+												acc_i1   += calculate_rms_current(0, &tmp_vop);
+												acc_vop1 += tmp_vop;
+												acc_v1   += calculate_rms_voltage(1);
+
+												acc_i2   += calculate_rms_current(2, &tmp_vop);
+												acc_vop2 += tmp_vop;
+												acc_v2   += calculate_rms_voltage(3);
+
+												acc_i3   += calculate_rms_current(4, &tmp_vop);
+												acc_vop3 += tmp_vop;
+												acc_v3   += calculate_rms_voltage(5);
+
+												_delay_ms(20);
+											}
+
+											out1_vopamp  = acc_vop1 / AVG_READINGS;
+											float v1_raw = acc_v1   / AVG_READINGS;
+											out1_irms    = (out1_vopamp / BURDEN_R) * 1000.0f;
+											out1_vrms    = v1_raw * 609.74f;
+
+											out2_vopamp  = acc_vop2 / AVG_READINGS;
+											float v2_raw = acc_v2   / AVG_READINGS;
+											out2_irms    = (out2_vopamp / BURDEN_R) * 1000.0f;
+											out2_vrms    = v2_raw * 656.91f;
+
+											out3_vopamp  = acc_vop3 / AVG_READINGS;
+											float v3_raw = acc_v3   / AVG_READINGS;
+											out3_irms    = (out3_vopamp / BURDEN_R) * 1000.0f;
+											out3_vrms    = v3_raw * 612.88f;
+
+											if (out1_irms < NOISE_FLOOR_A) out1_irms = 0.0f;
+											if (out2_irms < NOISE_FLOOR_A) out2_irms = 0.0f;
+											if (out3_irms < NOISE_FLOOR_A) out3_irms = 0.0f;
+
+											if (out1_vrms < VOLT_NOISE_FLOOR) out1_vrms = 0.0f;
+											if (out2_vrms < VOLT_NOISE_FLOOR) out2_vrms = 0.0f;
+											if (out3_vrms < VOLT_NOISE_FLOOR) out3_vrms = 0.0f;
+
+											(void)(acc_i1); (void)(acc_i2); (void)(acc_i3);
+
+											// ============================================================
+											// Format and send IRMS / VRMS / power
+											/*
+											dtostrf(out1_vopamp, 5, 3, out1_irms_print);
+											dtostrf(v1_raw, 5, 3, out1_vrms_print);
+											dtostrf(out2_vopamp, 5, 3, out2_irms_print);
+											dtostrf(v2_raw, 5, 3, out2_vrms_print);
+											dtostrf(out3_vopamp, 5, 3, out3_irms_print);
+											dtostrf(v3_raw, 5, 3, out3_vrms_print);
+											*/
+
+											dtostrf(out1_irms, 5, 3, out1_irms_print);
+											dtostrf(out1_vrms, 5, 2, out1_vrms_print);
+											dtostrf(out2_irms, 5, 3, out2_irms_print);
+											dtostrf(out2_vrms, 5, 2, out2_vrms_print);
+											dtostrf(out3_irms, 5, 3, out3_irms_print);
+											dtostrf(out3_vrms, 5, 2, out3_vrms_print);
+
+
+											send_string("-- OUTLET 1 --"); send_cr_lf();
+											strcpy(buffer, CURR1_ADDR);
+											strcpy(str, out1_irms_print); strcat(str, CURR_ENDS); strcat(str, end_of_str);
+											strcat(buffer, str); send_string(buffer); send_cr_lf();
+											send_string("volt_1= "); send_string(out1_vrms_print); send_string("V"); send_cr_lf();
+											send_cr_lf();
+
+											send_string("-- OUTLET 2 --"); send_cr_lf();
+											strcpy(buffer, CURR2_ADDR);
+											strcpy(str, out2_irms_print); strcat(str, CURR_ENDS); strcat(str, end_of_str);
+											strcat(buffer, str); send_string(buffer); send_cr_lf();
+											send_string("volt_2= "); send_string(out2_vrms_print); send_string("V"); send_cr_lf();
+											send_cr_lf();
+
+											send_string("-- OUTLET 3 --"); send_cr_lf();
+											strcpy(buffer, CURR3_ADDR);
+											strcpy(str, out3_irms_print); strcat(str, CURR_ENDS); strcat(str, end_of_str);
+											strcat(buffer, str); send_string(buffer); send_cr_lf();
+											send_string("volt_3= "); send_string(out3_vrms_print); send_string("V"); send_cr_lf();
+											send_cr_lf();
+
+											out1_realtime_power_watts = out1_vrms * out1_irms ;
+											out2_realtime_power_watts = out2_vrms * out2_irms ;
+											out3_realtime_power_watts = out3_vrms * out3_irms ;
+
+											if (out1_irms == 0.0f) out1_realtime_power_watts = 0.0f;
+											if (out2_irms == 0.0f) out2_realtime_power_watts = 0.0f;
+											if (out3_irms == 0.0f) out3_realtime_power_watts = 0.0f;
+											
+											
+											
+											if (energy_tick) {
+												energy_tick = 0;   // clear flag
+
+												// Add this second's contribution: P(W) * (1/3600) = Wh per second
+												out1_energy_wh += out1_realtime_power_watts / 3600.0f;
+												out2_energy_wh += out2_realtime_power_watts / 3600.0f;
+												out3_energy_wh += out3_realtime_power_watts / 3600.0f;
+
+
+											dtostrf(out1_energy_wh, 12, 7, act_float_engr_sen_1_print);
+											dtostrf(out2_energy_wh, 12, 7, act_float_engr_sen_2_print);
+											dtostrf(out3_energy_wh, 12, 7, act_float_engr_sen_3_print);
+
+											strcpy(buffer, ENGR1_ADDR);
+											strcpy(str, act_float_engr_sen_1_print); strcat(str, ENGY_ENDS); strcat(str, end_of_str);
+											strcat(buffer, str); send_string(buffer); send_cr_lf();
+
+											strcpy(buffer, ENGR2_ADDR);
+											strcpy(str, act_float_engr_sen_2_print); strcat(str, ENGY_ENDS); strcat(str, end_of_str);
+											strcat(buffer, str); send_string(buffer); send_cr_lf();
+
+											strcpy(buffer, ENGR3_ADDR);
+											strcpy(str, act_float_engr_sen_3_print); strcat(str, ENGY_ENDS); strcat(str, end_of_str);
+											strcat(buffer, str); send_string(buffer); send_cr_lf();
+
+											}
+											// ============================================================
+											// Outlet relay + LED control
+											control_outlet1_pin();
+											control_outlet2_pin();
+											control_outlet3_pin();
+
+
+
+											if (eeprom_dirty) {
+												outlet1_enable = out1_enabled_state;
+												outlet2_enable = out2_enabled_state;
+												outlet3_enable = out3_enabled_state;
+												save_settings_to_eeprom();
+												eeprom_dirty = 0;
+											}
+
+											// ============================================================
+											// Overcurrent protection — pass real elapsed ms
+											check_overcurrent_out1(out1_irms, dt_ms);
+											check_overcurrent_out2(out2_irms, dt_ms);
+											check_overcurrent_out3(out3_irms, dt_ms);
+
+											_delay_ms(LOOP_DELAY_MS);
+										}
+
+										return 0;
+
+									}
